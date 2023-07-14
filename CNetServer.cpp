@@ -541,6 +541,11 @@ int CNetServer::getJobQueueSize(INT64 SessionID)
 	return pSession->JobQueue.size();
 }
 
+int CNetServer::getJobPoolSize()
+{
+	return JobPool.getUseSize();
+}
+
 std::queue<st_JobItem*>* CNetServer::getJobQueue(INT64 SessionID)
 {
 	short index = (short)SessionID;
@@ -582,8 +587,10 @@ void CNetServer::freeJobItem(st_JobItem* JobItem)
 
 bool CNetServer::popLoginQueue(INT64* pSessionID)
 {
-	if (LoginQueue.Dequeue(pSessionID) == true)
+	INT64 temp;
+	if (LoginQueue.Dequeue(&temp) == true)
 	{
+		*pSessionID = temp;
 		return true;
 	}
 	
@@ -900,7 +907,8 @@ DWORD WINAPI CNetServer::WorkerThread(CNetServer* ptr)
 
 			else if (transferred == dfONCLIENTLEAVE_SUCESS && pOverlapped == 0)
 			{
-				ptr->emptyIndexStack.push(pSession->sessionID);
+				short index = (short)pSession->sessionID;
+				ptr->emptyIndexStack.push(index);
 				continue;
 			}
 
@@ -1027,7 +1035,7 @@ bool CNetServerHandler::OnConnectionRequest()
 
 void CNetServerHandler::OnClientJoin(st_Session* pSession)
 {
-
+	/*
 	st_JobItem* jobItem;
 	pNetServer->JobPool.mAlloc(&jobItem);
 	jobItem->JobType = en_JOB_ON_CLIENT_JOIN;
@@ -1037,6 +1045,7 @@ void CNetServerHandler::OnClientJoin(st_Session* pSession)
 	pNetServer->AcquireJobQueueLock(pSession);
 	pSession->JobQueue.push(jobItem); // 로그인 스레드에서 처리
 	pNetServer->ReleaseJobQueueLock(pSession);
+	*/
 
 	//로그인스레드에 수동으로 넣어줘야함.
 	pNetServer->LoginQueue.Enqueue(pSession->sessionID);

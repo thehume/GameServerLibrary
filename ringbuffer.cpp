@@ -6,7 +6,7 @@
 //size - 1만큼 사용가능
 CRingBuffer::CRingBuffer(void)
 {
-    size = 80001;
+    size = 10001;
 
     begin = (char*)VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (begin == NULL)

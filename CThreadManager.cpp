@@ -22,17 +22,18 @@
 #include "CNetServer.h"
 #include "CThreadManager.h"
 
+CMemoryPoolBucket<st_Player> CParentThread::PlayerPool;
+
 DWORD WINAPI CParentThread::ThreadFunction(CParentThread* Instance)
 {
-
-
-	//대기큐에서 뽑는다
+	
 	CThreadHandler* pThreadHandler = Instance->pThreadManager->pThreadHandler;
 	CNetServer* pServer = Instance->pServer;
 	int enterQueueSize;
 	int PlayerListSize;
 	while (!Instance->shutdown)
 	{
+		Instance->Frame++;
 		DWORD startTime = timeGetTime();
 
 		Instance->Update();
@@ -47,6 +48,9 @@ DWORD WINAPI CParentThread::ThreadFunction(CParentThread* Instance)
 			AcquireSRWLockExclusive(&Instance->enterQueueLock);
 			for (int i = 0; i < enterQueueSize; i++)
 			{
+				Instance->pThreadManager->ThreadMoveTPS++;
+				Instance->EnterUserTPS++;
+
 				st_ThreadMoveInfo temp = Instance->enterQueue.front();
 				INT64 sessionID = temp.pPlayer->SessionID;
 				INT64 AccountNo = temp.pPlayer->AccountNo;
@@ -98,13 +102,14 @@ DWORD WINAPI CParentThread::ThreadFunction(CParentThread* Instance)
 					if (LeaveFlag == true)
 					{
 						pServer->PostLeaveCompletion(sessionID); //PQCS로 워커에게 Leave완료 알려주기.
-						Instance->pThreadManager->pThreadHandler->onPlayerLeave(AccountNo);
+						Instance->pThreadManager->pThreadHandler->onPlayerLeave(AccountNo, temp.pPlayer->playerInfo);
 						PlayerPool.mFree(temp.pPlayer);
 					}
 					else
 					{
 						Instance->PlayerList.push_back(temp.pPlayer);
 						pThreadHandler->onPlayerMove(AccountNo, temp.srcThread, temp.desThread); //OnPlayerMove 호출		
+						Instance->onThreadJoin(temp.pPlayer->SessionID, AccountNo, temp.pPlayer->playerInfo);
 					}
 				}
 
@@ -126,69 +131,76 @@ DWORD WINAPI CParentThread::ThreadFunction(CParentThread* Instance)
 				int JobQueueSize = pServer->getJobQueueSize(sessionID);
 				if (pJobQueue != NULL)
 				{
+					
+
 					volatile short MoveThreadNum = -1;
 					volatile bool MoveFlag = false;
 					volatile bool LeaveFlag = false;
 					st_JobItem* JobItem;
 					INT64 JobType;
 					INT64 AccountNo;
-					for (int i = 0; i < JobQueueSize && !(MoveFlag == true && LeaveFlag == false) ; i++)
+					if (JobQueueSize >= 0)
 					{
-						JobItem = pServer->PopJobItem(sessionID);
-						JobType = JobItem->JobType;
-						AccountNo = JobItem->AccountNo;
-						CPacket* pPacket = JobItem->pPacket;
-						pServer->freeJobItem(JobItem);
 
-
-						switch (JobType)
+						for (int i = 0; i < JobQueueSize && !(MoveFlag == true && LeaveFlag == false); i++)
 						{
-						case en_JOB_ON_CLIENT_LEAVE: //LeaveFlag가 true로 바꿔줌, 이후 모든 잡 및 스레드이동 무시됨, PQCS로 완료를 던져야함.
-						{
-							LeaveFlag = true;
-							break;
-						}
+							Instance->pThreadManager->GameThread_JobTPS++;
+							JobItem = pServer->PopJobItem(sessionID);
+							JobType = JobItem->JobType;
+							AccountNo = JobItem->AccountNo;
+							CPacket* pPacket = JobItem->pPacket;
+							pServer->freeJobItem(JobItem);
 
-						case en_JOB_ON_RECV:
-						{
 
-							if (LeaveFlag == false)
+							switch (JobType)
 							{
-								Instance->OnRecv(&MoveFlag, &MoveThreadNum);
-							}
-							if (pPacket->subRef() == 0)
+							case en_JOB_ON_CLIENT_LEAVE: //LeaveFlag가 true로 바꿔줌, 이후 모든 잡 및 스레드이동 무시됨, PQCS로 완료를 던져야함.
 							{
-								CPacket::mFree(pPacket);
+								LeaveFlag = true;
+								break;
 							}
-							break;
-						}
 
-						default:
+							case en_JOB_ON_RECV:
+							{
+
+								if (LeaveFlag == false)
+								{
+									Instance->OnRecv(&MoveFlag, &MoveThreadNum, (*iter)->playerInfo, (*iter)->SessionID, AccountNo, pPacket);
+								}
+								if (pPacket->subRef() == 0)
+								{
+									CPacket::mFree(pPacket);
+								}
+								break;
+							}
+
+							default:
+							{
+								//로그찍기
+								break;
+							}
+							}
+						}
+						if (LeaveFlag == true)
 						{
-							//로그찍기
-							break;
+							pServer->PostLeaveCompletion(sessionID); //PQCS로 워커에게 Leave완료 알려주기.
+							//컨텐츠에 leave 알림.
+							st_Player* pPlayer = *iter;
+							iter = Instance->PlayerList.erase(iter);
+							pThreadHandler->onPlayerLeave(AccountNo, pPlayer->playerInfo);
+							PlayerPool.mFree(pPlayer);
 						}
+						else if (LeaveFlag == false && MoveFlag == true)
+						{
+							//이동할 대상 스레드의 대기큐에 꽂고, 나 삭제
+							//스레드 이동결과를 컨텐츠쪽에 알리는것은 이동한 스레드에서 처리
+							Instance->pThreadManager->MovePlayer(Instance->ThreadNumber, MoveThreadNum, *iter);
+							iter = Instance->PlayerList.erase(iter);
 						}
-					}
-					if (LeaveFlag == true)
-					{
-						pServer->PostLeaveCompletion(sessionID); //PQCS로 워커에게 Leave완료 알려주기.
-						//컨텐츠에 leave 알림.
-						st_Player* pPlayer = *iter;
-						iter = Instance->PlayerList.erase(iter);
-						pThreadHandler->onPlayerLeave(AccountNo);
-						PlayerPool.mFree(pPlayer);
-					}
-					else if (LeaveFlag == false && MoveFlag == true)
-					{
-						//이동할 대상 스레드의 대기큐에 꽂고, 나 삭제
-						//스레드 이동결과를 컨텐츠쪽에 알리는것은 이동한 스레드에서 처리
-						Instance->pThreadManager->MovePlayer(Instance->ThreadNumber, MoveThreadNum, *iter);
-						iter = Instance->PlayerList.erase(iter);
-					}
-					else
-					{
-						iter++;
+						else
+						{
+							iter++;
+						}
 					}
 				}
 				else
@@ -209,6 +221,7 @@ DWORD WINAPI CParentThread::ThreadFunction(CParentThread* Instance)
 
 
 	}
+	return true;
 }
 
 
@@ -224,17 +237,24 @@ DWORD WINAPI CLoginThread::LoginThreadFunction(CLoginThread* Instance)
 	int PlayerListSize;
 	while (!Instance->shutdown)
 	{
-
+		Instance->Frame++;
 		DWORD startTime = timeGetTime();
 
 		INT64 LoginSessionID;
 		while (pServer->popLoginQueue(&LoginSessionID) == true)
 		{
+			Instance->pThreadManager->LoginTPS++;
+
 			st_Player* pPlayer;
 			PlayerPool.mAlloc(&pPlayer);
 			pPlayer->SessionID = LoginSessionID;
-			if (pThreadHandler->onPlayerJoin(LoginSessionID, &pPlayer->AccountNo, &pPlayer->playerInfo) == true)
+			pPlayer->AccountNo = -1;
+			pPlayer->playerInfo = NULL;
+			
+			PlayerInfo* pPlayerInfo = pThreadHandler->onPlayerJoin(LoginSessionID);
+			if (pPlayerInfo != NULL)
 			{
+				pPlayer->playerInfo = pPlayerInfo;
 				Instance->PlayerList.push_back(pPlayer);
 			}
 			else
@@ -247,6 +267,7 @@ DWORD WINAPI CLoginThread::LoginThreadFunction(CLoginThread* Instance)
 				}
 				
 			}
+			
 		}
 
 		Instance->Update();
@@ -273,6 +294,9 @@ DWORD WINAPI CLoginThread::LoginThreadFunction(CLoginThread* Instance)
 					INT64 AccountNo;
 					for (int i = 0; i < JobQueueSize && !(MoveFlag == true && LeaveFlag == false); i++)
 					{
+						Instance->pThreadManager->LoginThread_JobTPS++;
+
+
 						JobItem = pServer->PopJobItem(sessionID);
 						JobType = JobItem->JobType;
 						AccountNo = JobItem->AccountNo;
@@ -293,7 +317,7 @@ DWORD WINAPI CLoginThread::LoginThreadFunction(CLoginThread* Instance)
 
 							if (LeaveFlag == false)
 							{
-								Instance->OnRecv(&MoveFlag, &MoveThreadNum);
+								Instance->OnRecv(&MoveFlag, &MoveThreadNum, (*iter)->playerInfo, (*iter)->SessionID, AccountNo, pPacket);
 							}
 							if (pPacket->subRef() == 0)
 							{
@@ -315,7 +339,7 @@ DWORD WINAPI CLoginThread::LoginThreadFunction(CLoginThread* Instance)
 						//컨텐츠에 leave 알림.
 						st_Player* pPlayer = *iter;
 						iter = Instance->PlayerList.erase(iter);
-						pThreadHandler->onPlayerLeave(AccountNo);
+						pThreadHandler->onPlayerLeave(AccountNo, pPlayer->playerInfo);
 						PlayerPool.mFree(pPlayer);
 					}
 					else if (LeaveFlag == false && MoveFlag == true)
@@ -348,9 +372,23 @@ DWORD WINAPI CLoginThread::LoginThreadFunction(CLoginThread* Instance)
 
 
 	}
+	return true;
 }
 
 
+void CLoginThread::onLoginSucess(INT64 sessionID, INT64 AccountNo)
+{
+	for (auto iter = PlayerList.begin(); iter != PlayerList.end(); iter++)
+	{
+		st_Player* pPlayer = *iter;
+		if (pPlayer->SessionID == sessionID)
+		{
+			pPlayer->AccountNo = AccountNo;
+			pPlayer->playerInfo->isValid = true;
+			break;
+		}
+	}
+}
 
 
 void CThreadManager::registThread(short threadNo, CParentThread* pThread, bool isLoginThread)
@@ -364,6 +402,7 @@ void CThreadManager::registThread(short threadNo, CParentThread* pThread, bool i
 		GameThreadList.insert(make_pair(threadNo, (CParentThread*)pThread));
 	}
 	pThread->pThreadManager = this;
+	pThread->pThreadHandler = this->pThreadHandler;
 	Threadindex++;
 }
 
@@ -389,7 +428,7 @@ bool CThreadManager::MovePlayer(short srcThreadNo, short DesThreadNo, st_Player*
 
 void CThreadManager::attachServerInstance(CNetServer* pNetServer)
 {
-	this->pNetServer = pNetServer;
+	this->pServer = pNetServer;
 	for (auto iter = LoginThreadList.begin(); iter != LoginThreadList.end(); iter++)
 	{
 		CLoginThread* pLoginThread = iter->second;
@@ -409,7 +448,7 @@ void CThreadManager::start()
 	for (auto iter = LoginThreadList.begin(); iter != LoginThreadList.end(); iter++)
 	{
 		CLoginThread* pLoginThread = iter->second;
-		ThreadHANDLE[index] = (HANDLE)_beginthreadex(NULL, 0, (_beginthreadex_proc_type)&pLoginThread->ThreadFunction, pLoginThread, 0, 0);
+		ThreadHANDLE[index] = (HANDLE)_beginthreadex(NULL, 0, (_beginthreadex_proc_type)&pLoginThread->LoginThreadFunction, pLoginThread, 0, 0);
 		index++;
 	}
 

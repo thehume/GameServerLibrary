@@ -136,6 +136,7 @@ public:
 	void ReleaseJobQueueLock(INT64 SessionID);
 	void ReleaseJobQueueLock(st_Session* pSession);
 	int getJobQueueSize(INT64 SessionID);
+	int getJobPoolSize();
 	std::queue<st_JobItem*>* getJobQueue(INT64 SessionID);
 	void ClearJobQueue(INT64 SessionID);
 	st_JobItem* PopJobItem(INT64 SessionID);
