@@ -103,12 +103,8 @@ public:
 			Node* pNext = pFront->next;
 			if (pNext == NULL)
 			{
-				if (nodeCount >= 0)
-				{
-					continue;
-				}
-				InterlockedIncrement(&nodeCount);
-				return false;
+				continue;
+
 			}
 			else
 			{
